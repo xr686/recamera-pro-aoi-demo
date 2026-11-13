@@ -1,0 +1,86 @@
+#!/bin/sh
+# S98aoi_autostart - AOI demo power-on autostart (added 2026-11-13, owner request)
+#   1) External LED on GPIO201 -> export / out / high
+#   2) UART4 (/dev/ttyS4) 115200 raw for XIAO link
+#   3) /userdata/aoi_cal_server.py  (calibration web UI :8899)
+#   4) /userdata/aoi_conductor.py   (tray rotate -> judge -> LED verdict)
+# aoi-pcb-detect app itself is auto-restored by appmgr (S94appmgr boot_restore).
+# Idempotent: safe to run twice. NOTE: busybox pkill/pgrep unreliable -> scan /proc.
+
+LOG=/userdata/aoi-autostart.log
+
+running() { # $1 = substring to look for in cmdlines
+	for p in /proc/[0-9]*/cmdline; do
+		c=$(tr "\0" " " < "$p" 2>/dev/null)
+		case "$c" in
+			*"$1"*) return 0 ;;
+		esac
+	done
+	return 1
+}
+
+killpat() { # $1 = substring; kill matching pids (skip self)
+	for p in /proc/[0-9]*/cmdline; do
+		pid=${p#/proc/}; pid=${pid%/cmdline}
+		[ "$pid" = "$$" ] && continue
+		c=$(tr "\0" " " < "$p" 2>/dev/null)
+		case "$c" in
+			*"$1"*) kill "$pid" 2>/dev/null ;;
+		esac
+	done
+}
+
+start() {
+	{
+		echo "=== $(date) S98aoi_autostart start ==="
+
+		# 1) GPIO201 external LED
+		[ -d /sys/class/gpio/gpio201 ] || echo 201 > /sys/class/gpio/export 2>/dev/null
+		sleep 1
+		echo out > /sys/class/gpio/gpio201/direction 2>/dev/null
+		echo 1   > /sys/class/gpio/gpio201/value 2>/dev/null
+		echo "gpio201: dir=$(cat /sys/class/gpio/gpio201/direction 2>/dev/null) val=$(cat /sys/class/gpio/gpio201/value 2>/dev/null)"
+
+		# 2) UART4 for XIAO (fw v0.3-c5)
+		stty -F /dev/ttyS4 115200 raw -echo -echoe -echok 2>/dev/null
+
+		# 3) calibration web UI
+		if running "aoi_cal_server.py"; then
+			echo "aoi_cal_server already running"
+		else
+			nohup python3 /userdata/aoi_cal_server.py >> /userdata/aoi_cal_server.log 2>&1 &
+			echo "aoi_cal_server started pid=$!"
+		fi
+
+		# 4) conductor
+		rm -f /tmp/aoi_conductor.stop
+		if running "aoi_conductor.py"; then
+			echo "aoi_conductor already running"
+		else
+			nohup python3 /userdata/aoi_conductor.py >> /userdata/aoi-conductor-boot.log 2>&1 &
+			echo "aoi_conductor started pid=$!"
+		fi
+	} >> $LOG 2>&1
+}
+
+case "$1" in
+	start)
+		start
+		;;
+	stop)
+		touch /tmp/aoi_conductor.stop
+		killpat "aoi_cal_server.py"
+		echo "$(date) S98aoi_autostart stop" >> $LOG
+		;;
+	restart|reload)
+		$0 stop
+		sleep 2
+		$0 start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac
+
+exit 0
